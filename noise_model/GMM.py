@@ -67,17 +67,29 @@ class GMM(pl.LightningModule):
             s = torch.zeros_like(x)
 
         n = x - s
-        
-        n = n - self.noise_mean
-        n = n / self.noise_std
-        
-        if self.training:
-            pred = self.forward(n)
+
+        if n.shape[1] == 1:
+            n_norm = (n - self.noise_mean) / self.noise_std
+            model_in = n_norm
+            n_like = n_norm
         else:
-            pred = self.forward(n).detach()
-            
+            # Channel 0: noise (normalised). Remaining channels: e.g. positional
+            # encoding, passed through without noise_mean / noise_std.
+            n0 = (n[:, :1] - self.noise_mean) / self.noise_std
+            model_in = torch.cat([n0, n[:, 1:]], dim=1)
+            n_like = n0
+
+        if self.training:
+            pred = self.forward(model_in)
+        else:
+            pred = self.forward(model_in).detach()
+
         means, stds, weights = self.get_gaussian_params(pred)
-        likelihoods= -0.5*((means-n)/stds)**2 - torch.log(stds) -np.log(2.0*np.pi)*0.5
+        likelihoods = (
+            -0.5 * ((means - n_like) / stds) ** 2
+            - torch.log(stds)
+            - np.log(2.0 * np.pi) * 0.5
+        )
         temp = torch.max(likelihoods, dim = 1, keepdim = True)[0].detach()
         likelihoods=torch.exp( likelihoods -temp) * weights
         loglikelihoods = torch.log(torch.sum(likelihoods, dim = 1, keepdim = True))
@@ -103,39 +115,68 @@ class GMM(pl.LightningModule):
         return out    
     
     @torch.no_grad()
-    def sample(self, img_shape):
+    def sample(self, img_shape, positional_encoding=None, noise_channels=None):
         """Samples images from the trained autoregressive model.
 
         Parameters
         ----------
         img_shape : List or tuple
-            The shape of the image with format [N, C, H, W], where N is the number
-            of images, C is the colour channel, H is the height of the images, W
-            is the width of the images.
+            Shape ``[N, C, H, W]`` (batch, channels, height, width). For data
+            with noise plus positional encodings, set ``C = 1 + d_model`` and pass
+            ``positional_encoding`` with the fixed PE channels.
+        positional_encoding : torch.FloatTensor, optional
+            Shape ``[N, C - noise_channels, H, W]``. Copied into ``img`` after
+            the noise channels (e.g. channels ``1:`` when ``noise_channels=1``).
+        noise_channels : int, optional
+            How many leading channels are modelled autoregressively. Default is
+            ``img_shape[1]`` (all channels), or ``1`` when ``positional_encoding``
+            is given.
 
         Returns
         -------
         torch.FloatTensor
-            The generated images.
+            The generated tensor in the same layout as training inputs (noise
+            channels are denormalised; conditioning channels are unchanged).
 
         """
-        # Create empty image
-        img = torch.zeros(img_shape, dtype=torch.float).to(self.device)
-        # Generation loop
-        for h in tqdm(range(img_shape[2]), leave=False):
-            for w in range(img_shape[3]):
-                for c in range(img_shape[1]):
-                    # For efficiency, we only have to input the upper part of the image
-                    # as all other parts will be skipped by the masked convolutions anyways
+        n_batch, c_tot, height, width = img_shape
+        if noise_channels is None:
+            noise_channels = 1 if positional_encoding is not None else c_tot
+        if positional_encoding is not None:
+            if positional_encoding.shape != (
+                n_batch,
+                c_tot - noise_channels,
+                height,
+                width,
+            ):
+                raise ValueError(
+                    "positional_encoding shape must be [N, C - noise_channels, H, W]"
+                )
+
+        img = torch.zeros(img_shape, dtype=torch.float, device=self.device)
+        if positional_encoding is not None:
+            img[:, noise_channels:] = positional_encoding.to(
+                device=self.device, dtype=torch.float
+            )
+
+        for h in tqdm(range(height), leave=False):
+            for w in range(width):
+                for c in range(noise_channels):
                     pred = self.forward(img[:, :, : h + 1, :])
                     means, stds, weights = self.get_gaussian_params(pred)
-                    means = means[:,:,h,w][...,np.newaxis,np.newaxis]
-                    stds = stds[:,:,h,w][...,np.newaxis,np.newaxis]
-                    weights = weights[:,:,h,w][...,np.newaxis,np.newaxis]
+                    means = means[:, :, h, w][..., np.newaxis, np.newaxis]
+                    stds = stds[:, :, h, w][..., np.newaxis, np.newaxis]
+                    weights = weights[:, :, h, w][..., np.newaxis, np.newaxis]
                     samp = self.sampleFromMix(means, stds, weights).detach()
-                    img[:, c, h, w] = samp[:,0,0]
-                    
-        return img*self.noise_std + self.noise_mean
+                    img[:, c, h, w] = samp[:, 0, 0]
+
+        if noise_channels == c_tot:
+            return img * self.noise_std + self.noise_mean
+        out = img.clone()
+        out[:, :noise_channels] = (
+            out[:, :noise_channels] * self.noise_std + self.noise_mean
+        )
+        return out
     
     def training_step(self, batch, batch_idx):
         loss = -torch.mean(self.loglikelihood(batch))

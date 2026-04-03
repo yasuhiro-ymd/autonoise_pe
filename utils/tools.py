@@ -22,8 +22,11 @@ def show_center_recep_field(img, out):
     img_grads = img.grad.abs()
     img.grad.fill_(0)  # Reset grads
 
-    # Plot receptive field
-    img = img_grads.squeeze().cpu().numpy()
+    # Plot receptive field (aggregate over input channels if C > 1)
+    if img_grads.shape[1] > 1:
+        img = img_grads.sum(dim=1).squeeze(0).cpu().numpy()
+    else:
+        img = img_grads.squeeze().cpu().numpy()
     _, ax = plt.subplots()
     if img.ndim == 1:
         ax.plot(img > 0, "o")
@@ -36,8 +39,9 @@ def show_center_recep_field(img, out):
     plt.close()
 
 
-def view_receptive_field(noise_model, img_shape):
-    inp_img = torch.zeros(1, 1, *img_shape).requires_grad_()
+def view_receptive_field(noise_model, img_shape, in_channels=1):
+    """``img_shape`` is ``(height, width)``, i.e. (time, channel) spatial axes."""
+    inp_img = torch.zeros(1, in_channels, *img_shape).requires_grad_()
     out = noise_model(inp_img)
     show_center_recep_field(inp_img, out[:, [0]])
 

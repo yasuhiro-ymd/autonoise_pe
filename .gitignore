@@ -34,3 +34,5 @@ private/
 .DS_Store?
 ._.DS_Store
 ._.DS_Store?
+._*
+.DS_Store

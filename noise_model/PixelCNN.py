@@ -175,7 +175,10 @@ class PixelCNN(GMM):
     Parameters
     ----------
     in_channels : int, optional
-        The number of input channels. The default is 1.
+        Number of input feature channels at each (time, channel) location.
+        Use 1 for plain noise, or ``1 + d_model`` when the first channel is
+        noise and the rest are positional encodings (not mixed across space by
+        conv; Conv2d uses this as the channel axis only).
     n_filters : int, optional
         The number of hidden channels. The default is 128.
     kernel_size : int, optional
@@ -208,7 +211,8 @@ class PixelCNN(GMM):
         self.save_hyperparameters()
         super().__init__(n_gaussians, noise_mean, noise_std, lr)
 
-        out_channels = in_channels * n_gaussians * 3
+        # Scalar GMM per (time, channel) site; independent of input width.
+        out_channels = n_gaussians * 3
 
         self.up_inconv = VerticalConvolution(
             in_channels, n_filters, kernel_size, mask_center=True

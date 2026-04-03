@@ -7,24 +7,41 @@ class nm_dataset(torch.utils.data.Dataset):
     Parameters
     ----------
     n_data : numpy ndarray
-        The noise image data.
+        ``[B,H,W]``, ``[B,C,H,W]`` (``feature_layout="nchw"``), or
+        ``[B,time,channel,F]`` with ``F=1+d_model`` (``feature_layout="ntcf"``).
+        The ``ntcf`` layout is permuted to ``[B,F,time,channel]`` so Conv2d
+        scans time and channel only; ``F`` is the CNN channel axis.
     transform : torchvision.transforms function, optional
         Transformation to be applied to the images. The default is None.
+    feature_layout : str, optional
+        ``"nchw"`` (default) or ``"ntcf"`` for ``[batch, time, channel, features]``.
 
     """
-    def __init__(self, n_data, transform=None):
+    def __init__(self, n_data, transform=None, feature_layout="nchw"):
         self.n_data = torch.from_numpy(n_data).type(torch.float)
-        
+
         self.transform = transform
-    
-        if self.n_data.dim() == 3:
+
+        if feature_layout not in ("nchw", "ntcf"):
+            raise ValueError('feature_layout must be "nchw" or "ntcf"')
+
+        if feature_layout == "ntcf":
+            if self.n_data.dim() != 4:
+                print("ntcf layout expects [B, time, channel, F]")
+            else:
+                self.n_data = self.n_data.permute(0, 3, 1, 2).contiguous()
+        elif self.n_data.dim() == 3:
             self.n_data = self.n_data[:, np.newaxis]
         elif self.n_data.dim() != 4:
-            print('Data dimensions should be [B,C,H,W] or [B,H,W]')
-                
+            print("Data dimensions should be [B,H,W] or [B,C,H,W]")
+
     def getparams(self):
-        noise_mean = torch.mean(self.n_data)
-        noise_std = torch.std(self.n_data)
+        if self.n_data.shape[1] > 1:
+            noise_mean = torch.mean(self.n_data[:, 0])
+            noise_std = torch.std(self.n_data[:, 0])
+        else:
+            noise_mean = torch.mean(self.n_data)
+            noise_std = torch.std(self.n_data)
         return noise_mean, noise_std
     
     def __len__(self):
@@ -38,13 +55,15 @@ class nm_dataset(torch.utils.data.Dataset):
         
         return n
         
-def create_nm_loader(n_data, split=0.8, batch_size=32, transform=None):
+def create_nm_loader(
+    n_data, split=0.8, batch_size=32, transform=None, feature_layout="nchw"
+):
     """Creates pytorch dataloaders for training the noise model.
     
     Parameters
     ----------
     n_data : numpy ndarray
-        The noise image data.
+        Same layouts as :class:`nm_dataset`.
     split : Float, optional
         Percent of data to go into the training set, remaining
         data will go into the validation set. The default is 0.8.
@@ -52,6 +71,8 @@ def create_nm_loader(n_data, split=0.8, batch_size=32, transform=None):
         Size of batches. The default is 32.
     transform : torchvision.transforms function, optional
         Transformation to be applied to the images. The default is None.
+    feature_layout : str, optional
+        Passed to :class:`nm_dataset` (use ``"ntcf"`` for PE-augmented stacks).
 
     Returns
     -------
@@ -65,9 +86,11 @@ def create_nm_loader(n_data, split=0.8, batch_size=32, transform=None):
         Standard deviation of the noise data, used to normalise.
 
     """
-    dataset = nm_dataset(n_data, transform)
-    
-    train_set, val_set = torch.utils.data.random_split(dataset, [round(len(dataset)*split), round(len(dataset)*(1-split))])
+    dataset = nm_dataset(n_data, transform, feature_layout=feature_layout)
+
+    train_set, val_set = torch.utils.data.random_split(
+        dataset, [round(len(dataset) * split), round(len(dataset) * (1 - split))]
+    )
 
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=True, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=False, drop_last=True)
